@@ -38,6 +38,8 @@
 #include "statemachine.h"
 #include "ina219.h"
 
+#include "power_control.h"
+
 
 
 /* USER CODE END Includes */
@@ -80,7 +82,7 @@ PUTCHAR_PROTOTYPE
   {
 	  HAL_UART_Transmit(&huart2, (uint8_t*) "\r", 1, 0xFFFF);
   }
-   HAL_UART_Transmit(&huart2, (uint8_t*) &ch, 1, 0xFFFF);\
+   HAL_UART_Transmit(&huart2, (uint8_t*) &ch, 1, 0xFFFF);
    return ch;
 }
 
@@ -96,18 +98,19 @@ PUTCHAR_PROTOTYPE
 
 
 
+static int count = 0;
+INA219_t solar_sensor;   // I2C2 연결용
+INA219_t battery_sensor; // I2C3 연결용
+
+PowerControl_t p_ctrl;
 
 
-
-//volatile uint8_t rxData[1];
-//volatile uint8_t rxFlag = 0;
-//volatile uint8_t rxCmd = 0;
-volatile float v_bus = 0.0f;
-volatile float i_ma = 0.0f;
-volatile float spd_100_v[20] = {0.0f};
-volatile float spd_100_i[20] = {0.0f};
-volatile float spd_60_v[30] = {0.0f};
-volatile float spd_60_i[30] = {0.0f};
+//volatile float v_bus = 0.0f;
+//volatile float i_ma = 0.0f;
+//volatile float spd_100_v[20] = {0.0f};
+//volatile float spd_100_i[20] = {0.0f};
+//volatile float spd_60_v[30] = {0.0f};
+//volatile float spd_60_i[30] = {0.0f};
 
 
 
@@ -174,53 +177,29 @@ int main(void)
   MX_TIM11_Init();
   MX_USART1_UART_Init();
   MX_I2C3_Init();
+  MX_I2C2_Init();
+  MX_TIM1_Init();
+  MX_TIM10_Init();
   /* USER CODE BEGIN 2 */
 
+  // TIM1 Channel 2 PWM 시작
+  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2);
 
+  // TIM1 전용: 메인 출력을 활성화해야 핀으로 신호가 나갑니다.
+  __HAL_TIM_MOE_ENABLE(&htim1);
 
-
-
-  STMACHINE_Init();
-
+  // 3. 제어 루프용 타이머 인터럽트 시작 (지휘자 - 신규 타이머 권장)
+  HAL_TIM_Base_Start_IT(&htim10);
 
   HAL_TIM_Base_Start(&htim11);                  // for delay_us function
 
 
-//  Car_Move(CAR_FRONT, SPD_100);
-//
-//
-//
-//  		for (int var = 0; var < 20; var++)
-//  		{
-//  			v_bus = INA219_ReadBusVoltage(&hi2c3);
-//  			i_ma = INA219_ReadCurrent(&hi2c3);
-//  			spd_100_v[var] = v_bus;
-//  			spd_100_i[var] = i_ma;
-//
-//  			HAL_Delay(1000);
-//  		}
-//  	Car_Stop();
+  STMACHINE_Init();
+  INA219_Init(&solar_sensor, &hi2c2, 0x40);
+  INA219_Init(&battery_sensor, &hi2c3, 0x40);
+  PowerControl_Init(&p_ctrl);
 
-
-//  	Car_Move(CAR_FRONT, SPD_60);
-//
-//
-//
-//  	  		for (int var = 0; var <= 20; var++)
-//  	  		{
-//  	  			v_bus = INA219_ReadBusVoltage(&hi2c3);
-//  	  			i_ma = INA219_ReadCurrent(&hi2c3);
-//  	  			spd_60_v[var] = v_bus;
-//  	  			spd_60_i[var] = i_ma;
-//
-//  	  			HAL_Delay(1000);
-//  	  		}
-//  	  	Car_Stop();
-
-
-
-
-
+//  HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_2);
 
   /* USER CODE END 2 */
 
@@ -232,9 +211,45 @@ int main(void)
 
 
 
+	  // 1. 센서 데이터 업데이트 (I2C 통신은 시간이 걸리므로 while문에서 10ms 주기로 수행)
+	        INA219_Update(&solar_sensor);
+	        INA219_Update(&battery_sensor);
+
+	        // 2. 제어 로직 (이미 TIM10 인터럽트에서 1ms마다 돌고 있다면 여기서는 주석 처리)
+	        // PowerControl_Run(&p_ctrl, &solar_sensor, &battery_sensor);
+
+	        // 3. 출력 카운트 계산
+	        count++;
+	        if (count >= 50) { // 10ms * 50 = 약 500ms
+	            printf("Solar: %.2fV | Batt: %.2fV, %.1fmA | Raw_V: %.2fV | Filter_V: %.2fV| Duty: %.3f | MPPT_I: %.3fA\n",
+	                    solar_sensor.voltage_v,
+	                    battery_sensor.voltage_v,
+	                    battery_sensor.current_ma,
+						battery_sensor.voltage_raw,  // 센서가 읽은 실제 전압
+						battery_sensor.voltage_v,
+	                    p_ctrl.duty_out,
+	                    p_ctrl.mppt_i_ref);
+	            count = 0;
+	        }
+
+	        HAL_Delay(10); // 10ms 대기
+
+
+//	  // 500ms 마다 현재 제어 상태를 UART로 출력
+//	      printf("Solar: %.2fV | Batt: %.2fV, %.1fmA | Duty: %.3f | MPPT_I: %.3fA\n",
+//	              solar_sensor.voltage_v,
+//	              battery_sensor.voltage_v,
+//	              battery_sensor.current_ma,
+//	              p_ctrl.duty_out,
+//	              p_ctrl.mppt_i_ref);
+//
+//	      HAL_Delay(20); //
+
+
+
 //	  SHOW_UART2();
 
-	  ST_MACHINE();
+//	  ST_MACHINE();
 
 
 
@@ -295,6 +310,20 @@ void SystemClock_Config(void)
 }
 
 /* USER CODE BEGIN 4 */
+
+
+
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
+    if (htim->Instance == TIM10) {
+        // 정확히 1ms 마다 센서 업데이트 및 제어 실행
+//        INA219_Update(&solar_sensor);   //
+//        INA219_Update(&battery_sensor); //
+        PowerControl_Run(&p_ctrl, &solar_sensor, &battery_sensor);
+    }
+}
+
+
+
 
 /* USER CODE END 4 */
 
