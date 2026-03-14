@@ -16,6 +16,7 @@
   ******************************************************************************
   */
 /* USER CODE END Header */
+
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "i2c.h"
@@ -26,8 +27,6 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 
-
-
 #include "car.h"
 #include "direction.h"
 #include "speed.h"
@@ -37,10 +36,7 @@
 #include "ultrasonic.h"
 #include "statemachine.h"
 #include "ina219.h"
-
 #include "power_control.h"
-
-
 
 /* USER CODE END Includes */
 
@@ -52,69 +48,44 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 
+/* 센서 업데이트 / 디버그 출력 주기 */
+#define SENSOR_UPDATE_PERIOD_MS   10U
+#define DEBUG_PRINT_PERIOD_MS    500U
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
 
-
-
-
-
 #ifdef __GNUC__
-/* With GCC small printf (option LD Linker->Libraries->Small printf
- * set to 'Yes') calls __io_putchar() */
-#define PUTCHAR_PROTOTYPE int  __io_putchar(int ch)
+#define PUTCHAR_PROTOTYPE int __io_putchar(int ch)
 #else
-#define PUTCHAR_PROTOTYPE int  fputc(int ch, FILE *f)
-#endif /* __GNUC__*/
+#define PUTCHAR_PROTOTYPE int fputc(int ch, FILE *f)
+#endif
 
-/** @brief Retargets the C library printf function to the USART.
- *  @param None
- *  @retval None
- */
 PUTCHAR_PROTOTYPE
 {
-  /* Place your implementation of fputc here */
-  /* e.g. write a character to the USART2 and Loop
-     until the end of transmission */
-  if(ch == '\n')
-  {
-	  HAL_UART_Transmit(&huart2, (uint8_t*) "\r", 1, 0xFFFF);
-  }
-   HAL_UART_Transmit(&huart2, (uint8_t*) &ch, 1, 0xFFFF);
-   return ch;
+    if (ch == '\n')
+    {
+        HAL_UART_Transmit(&huart2, (uint8_t*)"\r", 1, 0xFFFF);
+    }
+    HAL_UART_Transmit(&huart2, (uint8_t*)&ch, 1, 0xFFFF);
+    return ch;
 }
-
-
-
-
 
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
-
 /* USER CODE BEGIN PV */
 
-
-
-static int count = 0;
-INA219_t solar_sensor;   // I2C2 연결용
-INA219_t battery_sensor; // I2C3 연결용
-
+INA219_t solar_sensor;      // I2C2
+INA219_t battery_sensor;    // I2C3
 PowerControl_t p_ctrl;
 
-
-//volatile float v_bus = 0.0f;
-//volatile float i_ma = 0.0f;
-//volatile float spd_100_v[20] = {0.0f};
-//volatile float spd_100_i[20] = {0.0f};
-//volatile float spd_60_v[30] = {0.0f};
-//volatile float spd_60_i[30] = {0.0f};
-
-
-
-
+/* 1ms scheduler flags */
+volatile uint8_t g_flag_ctrl_1ms   = 0U;
+volatile uint8_t g_flag_sense_10ms = 0U;
+volatile uint8_t g_flag_dbg_500ms  = 0U;
 
 /* USER CODE END PV */
 
@@ -122,22 +93,30 @@ PowerControl_t p_ctrl;
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
 
-
-
-
-
-//void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
-//{
-//
-//  Ultrasonic_IC_CaptureCallback(htim);
-//}
-
-
+static void App_PrintStatus(void);
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+static void App_PrintStatus(void)
+{
+    printf("[MODE:%s] "
+           "Vin=%.2fV Iin=%.0fmA Pin=%.3fW | "
+           "Vbat=%.3fV Ichg=%.0fmA | "
+           "Duty=%.3f | Iref=%.3fA Icv=%.3fA Imppt=%.3fA\n",
+           PowerControl_ModeString(p_ctrl.mode),
+           solar_sensor.voltage_v,
+           solar_sensor.current_ma,
+           solar_sensor.power_w,
+           battery_sensor.voltage_v,
+           battery_sensor.current_ma,
+           p_ctrl.duty_out,
+           p_ctrl.i_ref_last,
+           p_ctrl.i_cv_last,
+           p_ctrl.mppt_i_ref);
+}
 
 /* USER CODE END 0 */
 
@@ -147,28 +126,22 @@ void SystemClock_Config(void);
   */
 int main(void)
 {
-
   /* USER CODE BEGIN 1 */
 
   /* USER CODE END 1 */
 
-  /* MCU Configuration--------------------------------------------------------*/
-
-  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   HAL_Init();
 
   /* USER CODE BEGIN Init */
 
   /* USER CODE END Init */
 
-  /* Configure the system clock */
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
 
   /* USER CODE END SysInit */
 
-  /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_TIM2_Init();
   MX_USART2_UART_Init();
@@ -180,26 +153,29 @@ int main(void)
   MX_I2C2_Init();
   MX_TIM1_Init();
   MX_TIM10_Init();
+
   /* USER CODE BEGIN 2 */
 
-  // TIM1 Channel 2 PWM 시작
+  /* PWM start */
   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2);
-
-  // TIM1 전용: 메인 출력을 활성화해야 핀으로 신호가 나갑니다.
   __HAL_TIM_MOE_ENABLE(&htim1);
 
-  // 3. 제어 루프용 타이머 인터럽트 시작 (지휘자 - 신규 타이머 권장)
-  HAL_TIM_Base_Start_IT(&htim10);
+  /* base timers */
+  HAL_TIM_Base_Start_IT(&htim10);   // 1ms scheduler
+  HAL_TIM_Base_Start(&htim11);      // for delay_us if used elsewhere
 
-  HAL_TIM_Base_Start(&htim11);                  // for delay_us function
-
-
+  /* optional existing project init */
   STMACHINE_Init();
-  INA219_Init(&solar_sensor, &hi2c2, 0x40);
-  INA219_Init(&battery_sensor, &hi2c3, 0x40);
+
+  /* INA219 init */
+  INA219_Init(&solar_sensor, &hi2c2, INA219_ADDR_7BIT);
+  INA219_Init(&battery_sensor, &hi2c3, INA219_ADDR_7BIT);
+
+  /* Power control init */
   PowerControl_Init(&p_ctrl);
 
-//  HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_2);
+  printf("System start.\n");
+  printf("Solar charger control init done.\n");
 
   /* USER CODE END 2 */
 
@@ -207,54 +183,28 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+      /* 10ms: sensor update in main loop (not in ISR) */
+      if (g_flag_sense_10ms)
+      {
+          g_flag_sense_10ms = 0U;
 
+          INA219_Update(&solar_sensor);
+          INA219_Update(&battery_sensor);
 
+          /* battery side only filtered */
+          INA219_BatteryFilterUpdate(&battery_sensor);
+      }
 
+      /* 500ms: debug print */
+      if (g_flag_dbg_500ms)
+      {
+          g_flag_dbg_500ms = 0U;
+          App_PrintStatus();
+      }
 
-	  // 1. 센서 데이터 업데이트 (I2C 통신은 시간이 걸리므로 while문에서 10ms 주기로 수행)
-	        INA219_Update(&solar_sensor);
-	        INA219_Update(&battery_sensor);
-
-	        // 2. 제어 로직 (이미 TIM10 인터럽트에서 1ms마다 돌고 있다면 여기서는 주석 처리)
-	        // PowerControl_Run(&p_ctrl, &solar_sensor, &battery_sensor);
-
-	        // 3. 출력 카운트 계산
-	        count++;
-	        if (count >= 50) { // 10ms * 50 = 약 500ms
-	            printf("Solar: %.2fV | Batt: %.2fV, %.1fmA | Raw_V: %.2fV | Filter_V: %.2fV| Duty: %.3f | MPPT_I: %.3fA\n",
-	                    solar_sensor.voltage_v,
-	                    battery_sensor.voltage_v,
-	                    battery_sensor.current_ma,
-						battery_sensor.voltage_raw,  // 센서가 읽은 실제 전압
-						battery_sensor.voltage_v,
-	                    p_ctrl.duty_out,
-	                    p_ctrl.mppt_i_ref);
-	            count = 0;
-	        }
-
-	        HAL_Delay(10); // 10ms 대기
-
-
-//	  // 500ms 마다 현재 제어 상태를 UART로 출력
-//	      printf("Solar: %.2fV | Batt: %.2fV, %.1fmA | Duty: %.3f | MPPT_I: %.3fA\n",
-//	              solar_sensor.voltage_v,
-//	              battery_sensor.voltage_v,
-//	              battery_sensor.current_ma,
-//	              p_ctrl.duty_out,
-//	              p_ctrl.mppt_i_ref);
-//
-//	      HAL_Delay(20); //
-
-
-
-//	  SHOW_UART2();
-
-//	  ST_MACHINE();
-
-
-
-
-
+      /* other app tasks if needed */
+      // SHOW_UART2();
+      // ST_MACHINE();
 
     /* USER CODE END WHILE */
 
@@ -272,14 +222,9 @@ void SystemClock_Config(void)
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
-  /** Configure the main internal regulator output voltage
-  */
   __HAL_RCC_PWR_CLK_ENABLE();
   __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
 
-  /** Initializes the RCC Oscillators according to the specified parameters
-  * in the RCC_OscInitTypeDef structure.
-  */
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
   RCC_OscInitStruct.HSIState = RCC_HSI_ON;
   RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
@@ -294,10 +239,10 @@ void SystemClock_Config(void)
     Error_Handler();
   }
 
-  /** Initializes the CPU, AHB and APB buses clocks
-  */
-  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
-                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK
+                              | RCC_CLOCKTYPE_SYSCLK
+                              | RCC_CLOCKTYPE_PCLK1
+                              | RCC_CLOCKTYPE_PCLK2;
   RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
   RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
@@ -311,19 +256,40 @@ void SystemClock_Config(void)
 
 /* USER CODE BEGIN 4 */
 
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+    if (htim->Instance == TIM10)
+    {
+        static uint16_t cnt_10ms  = 0U;
+        static uint16_t cnt_500ms = 0U;
 
+        /* 1ms control task */
+        g_flag_ctrl_1ms = 1U;
 
-void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
-    if (htim->Instance == TIM10) {
-        // 정확히 1ms 마다 센서 업데이트 및 제어 실행
-//        INA219_Update(&solar_sensor);   //
-//        INA219_Update(&battery_sensor); //
-        PowerControl_Run(&p_ctrl, &solar_sensor, &battery_sensor);
+        /* run control immediately with latest sensor values */
+        if (g_flag_ctrl_1ms)
+        {
+            g_flag_ctrl_1ms = 0U;
+            PowerControl_Run(&p_ctrl, &solar_sensor, &battery_sensor);
+        }
+
+        /* 10ms sensor flag */
+        cnt_10ms++;
+        if (cnt_10ms >= SENSOR_UPDATE_PERIOD_MS)
+        {
+            cnt_10ms = 0U;
+            g_flag_sense_10ms = 1U;
+        }
+
+        /* 500ms debug flag */
+        cnt_500ms++;
+        if (cnt_500ms >= DEBUG_PRINT_PERIOD_MS)
+        {
+            cnt_500ms = 0U;
+            g_flag_dbg_500ms = 1U;
+        }
     }
 }
-
-
-
 
 /* USER CODE END 4 */
 
@@ -334,13 +300,13 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
-  /* User can add his own implementation to report the HAL error return state */
   __disable_irq();
   while (1)
   {
   }
   /* USER CODE END Error_Handler_Debug */
 }
+
 #ifdef USE_FULL_ASSERT
 /**
   * @brief  Reports the name of the source file and the source line number
@@ -352,8 +318,6 @@ void Error_Handler(void)
 void assert_failed(uint8_t *file, uint32_t line)
 {
   /* USER CODE BEGIN 6 */
-  /* User can add his own implementation to report the file name and line number,
-     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
   /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */
